@@ -1,101 +1,149 @@
-import Image from "next/image";
+'use client'
+
+import { useState } from 'react'
+import { useDropzone } from 'react-dropzone'
+import { useReactMediaRecorder } from 'react-media-recorder'
+import { CloudArrowUpIcon, MicrophoneIcon, StopIcon } from '@heroicons/react/24/outline'
 
 export default function Home() {
-  return (
-    <div className="grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20 font-[family-name:var(--font-geist-sans)]">
-      <main className="flex flex-col gap-8 row-start-2 items-center sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
-        />
-        <ol className="list-inside list-decimal text-sm text-center sm:text-left font-[family-name:var(--font-geist-mono)]">
-          <li className="mb-2">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] px-1 py-0.5 rounded font-semibold">
-              app/page.js
-            </code>
-            .
-          </li>
-          <li>Save and see your changes instantly.</li>
-        </ol>
+  const [presentationImage, setPresentationImage] = useState(null)
+  const [feedback, setFeedback] = useState(null)
+  const [isAnalyzing, setIsAnalyzing] = useState(false)
+  
+  const { status, startRecording, stopRecording, mediaBlobUrl } = useReactMediaRecorder({
+    audio: true,
+    video: false,
+  })
 
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
-          <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+  const { getRootProps, getInputProps } = useDropzone({
+    accept: {
+      'image/*': ['.png', '.jpg', '.jpeg']
+    },
+    maxFiles: 1,
+    onDrop: (acceptedFiles) => {
+      const file = acceptedFiles[0]
+      setPresentationImage(Object.assign(file, {
+        preview: URL.createObjectURL(file)
+      }))
+    }
+  })
+
+  const handleAnalysis = async () => {
+    if (!presentationImage || !mediaBlobUrl) {
+      alert('Please upload a presentation slide and record your speech first.')
+      return
+    }
+
+    setIsAnalyzing(true)
+    try {
+      // Here we'll implement the AI analysis logic later
+      const mockFeedback = {
+        slideAnalysis: "Your slide appears well-structured with clear headings.",
+        speechAnalysis: "Good pace and clarity in your speech. Consider varying your tone more.",
+        improvements: [
+          "Add more pauses for emphasis",
+          "Use more engaging visuals",
+          "Include key statistics to support your points"
+        ]
+      }
+      setFeedback(mockFeedback)
+    } catch (error) {
+      console.error('Analysis failed:', error)
+      alert('Failed to analyze the presentation. Please try again.')
+    } finally {
+      setIsAnalyzing(false)
+    }
+  }
+
+  return (
+    <div className="space-y-8">
+      <section className="grid md:grid-cols-2 gap-8">
+        <div className="space-y-4">
+          <h2 className="text-xl font-semibold">1. Upload Your Presentation Slide</h2>
+          <div
+            {...getRootProps()}
+            className="border-2 border-dashed border-gray-300 rounded-lg p-6 text-center hover:border-gray-400 transition-colors cursor-pointer"
           >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
-            />
-            Deploy now
-          </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:min-w-44"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Read our docs
-          </a>
+            <input {...getInputProps()} />
+            <CloudArrowUpIcon className="mx-auto h-12 w-12 text-gray-400" />
+            <p className="mt-2">Drag & drop a slide image here, or click to select</p>
+          </div>
+          {presentationImage && (
+            <div className="mt-4">
+              <img
+                src={presentationImage.preview}
+                alt="Uploaded slide"
+                className="max-h-48 mx-auto rounded-lg shadow-md"
+              />
+            </div>
+          )}
         </div>
-      </main>
-      <footer className="row-start-3 flex gap-6 flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
+
+        <div className="space-y-4">
+          <h2 className="text-xl font-semibold">2. Record Your Speech</h2>
+          <div className="border-2 rounded-lg p-6 text-center">
+            {status === 'recording' ? (
+              <button
+                onClick={stopRecording}
+                className="bg-red-500 text-white px-4 py-2 rounded-full hover:bg-red-600 transition-colors flex items-center justify-center gap-2 mx-auto"
+              >
+                <StopIcon className="h-5 w-5" />
+                Stop Recording
+              </button>
+            ) : (
+              <button
+                onClick={startRecording}
+                className="bg-blue-500 text-white px-4 py-2 rounded-full hover:bg-blue-600 transition-colors flex items-center justify-center gap-2 mx-auto"
+              >
+                <MicrophoneIcon className="h-5 w-5" />
+                Start Recording
+              </button>
+            )}
+            {mediaBlobUrl && (
+              <div className="mt-4">
+                <audio src={mediaBlobUrl} controls className="mx-auto" />
+              </div>
+            )}
+          </div>
+        </div>
+      </section>
+
+      <section className="text-center">
+        <button
+          onClick={handleAnalysis}
+          disabled={!presentationImage || !mediaBlobUrl || isAnalyzing}
+          className="bg-green-500 text-white px-6 py-3 rounded-full hover:bg-green-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
         >
-          <Image
-            aria-hidden
-            src="/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
+          {isAnalyzing ? 'Analyzing...' : 'Analyze Presentation'}
+        </button>
+      </section>
+
+      {feedback && (
+        <section className="space-y-6 bg-white p-6 rounded-lg shadow">
+          <h2 className="text-2xl font-semibold">Feedback</h2>
+          
+          <div className="space-y-4">
+            <div>
+              <h3 className="text-lg font-medium">Slide Analysis</h3>
+              <p className="text-gray-600">{feedback.slideAnalysis}</p>
+            </div>
+            
+            <div>
+              <h3 className="text-lg font-medium">Speech Analysis</h3>
+              <p className="text-gray-600">{feedback.speechAnalysis}</p>
+            </div>
+            
+            <div>
+              <h3 className="text-lg font-medium">Suggested Improvements</h3>
+              <ul className="list-disc list-inside text-gray-600">
+                {feedback.improvements.map((improvement, index) => (
+                  <li key={index}>{improvement}</li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        </section>
+      )}
     </div>
-  );
+  )
 }
