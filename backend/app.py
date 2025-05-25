@@ -1,11 +1,15 @@
 import os
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 from dotenv import load_dotenv
 from hume import HumeStreamClient
 from hume.models.config import ProsodyConfig
 import tempfile
 import asyncio
 import json
+import fitz  # PyMuPDF
+import base64
+from io import BytesIO
 from werkzeug.utils import secure_filename
 from functools import wraps
 
@@ -14,15 +18,71 @@ load_dotenv()
 
 app = Flask(__name__)
 
+# Configure CORS to allow requests from frontend
+CORS(app, resources={
+    r"/*": {
+        "origins": ["http://localhost:3000", "http://localhost:3001"],
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type"]
+    }
+})
+
 # Configure Hume AI client
 HUME_API_KEY = os.getenv('HUME_API_KEY')
 HUME_SECRET_KEY = os.getenv('HUME_SECRET_KEY')
+
+# Configure upload settings
+ALLOWED_EXTENSIONS = {'pdf', 'wav', 'mp3'}
+MAX_CONTENT_LENGTH = 16 * 1024 * 1024  # 16MB max file size
+
+def allowed_file(filename, allowed_types):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in allowed_types
 
 def async_route(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         return asyncio.run(f(*args, **kwargs))
     return decorated_function
+
+def process_pdf_to_images(pdf_file):
+    """
+    Convert PDF pages to base64 encoded PNG images
+    """
+    try:
+        # Create a temporary file to save the PDF
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_pdf:
+            pdf_file.save(temp_pdf.name)
+            
+            # Open the PDF with PyMuPDF
+            doc = fitz.open(temp_pdf.name)
+            slides = []
+            
+            # Process each page
+            for page_num in range(len(doc)):
+                page = doc[page_num]
+                
+                # Render page to PNG with higher resolution
+                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # 2x zoom for better quality
+                
+                # Convert to base64
+                img_bytes = pix.tobytes("png")
+                img_base64 = base64.b64encode(img_bytes).decode()
+                slides.append(f"data:image/png;base64,{img_base64}")
+            
+            doc.close()
+            os.unlink(temp_pdf.name)
+            
+            return {
+                'success': True,
+                'slides': slides,
+                'total_slides': len(slides)
+            }
+            
+    except Exception as e:
+        return {
+            'success': False,
+            'error': str(e)
+        }
 
 async def analyze_voice_emotion(audio_file_path):
     """
@@ -90,6 +150,32 @@ def generate_gemini_prompt(slide_analysis, transcript, emotion_data):
     Format your response with clear sections and actionable feedback.
     """
 
+@app.route('/process-pdf', methods=['POST'])
+def process_pdf():
+    """
+    Process uploaded PDF and convert pages to images
+    """
+    try:
+        if 'pdf' not in request.files:
+            return jsonify({'error': 'No PDF file provided'}), 400
+        
+        pdf_file = request.files['pdf']
+        if pdf_file.filename == '':
+            return jsonify({'error': 'No selected PDF file'}), 400
+            
+        if not allowed_file(pdf_file.filename, {'pdf'}):
+            return jsonify({'error': 'Invalid file type. Please upload a PDF file'}), 400
+            
+        result = process_pdf_to_images(pdf_file)
+        
+        if not result['success']:
+            return jsonify({'error': result.get('error', 'Failed to process PDF')}), 500
+            
+        return jsonify(result)
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/analyze', methods=['POST'])
 @async_route
 async def analyze():
@@ -100,6 +186,9 @@ async def analyze():
         audio_file = request.files['audio']
         if audio_file.filename == '':
             return jsonify({'error': 'No selected audio file'}), 400
+
+        if not allowed_file(audio_file.filename, {'wav', 'mp3'}):
+            return jsonify({'error': 'Invalid file type. Please upload a WAV or MP3 file'}), 400
 
         # Save audio file temporarily
         with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as temp_audio:
@@ -113,16 +202,14 @@ async def analyze():
                     'error': f"Emotion analysis failed: {emotion_analysis.get('error', 'Unknown error')}"
                 }), 500
 
-            # For now, we'll use placeholder values for slide analysis and transcript
-            # These will be implemented in the next iteration
-            slide_analysis = "Placeholder for slide analysis"
-            transcript = "Placeholder for speech transcript"
+            # Get the slide content from the request
+            slide_content = request.form.get('slide_content', 'No slide content provided')
+            transcript = "Placeholder for speech transcript"  # To be implemented
 
             # Generate enhanced prompt
-            prompt = generate_gemini_prompt(slide_analysis, transcript, emotion_analysis)
+            prompt = generate_gemini_prompt(slide_content, transcript, emotion_analysis)
 
             # For now, return the emotion analysis and prompt
-            # In the next iteration, we'll integrate with Gemini
             response = {
                 'emotionalAnalysis': emotion_analysis,
                 'prompt': prompt,
