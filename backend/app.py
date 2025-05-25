@@ -7,10 +7,10 @@ from hume.models.config import ProsodyConfig
 import tempfile
 import asyncio
 import json
-import fitz  # PyMuPDF
-import base64
-from io import BytesIO
-from werkzeug.utils import secure_filename
+from google.cloud import speech_v1
+from google.cloud.speech_v1 import types
+import google.generativeai as genai
+from typing import Dict, List, Any
 from functools import wraps
 
 # Load environment variables
@@ -28,13 +28,29 @@ CORS(app, resources={
     }
 })
 
-# Configure Hume AI client
+# Configure API clients
 HUME_API_KEY = os.getenv('HUME_API_KEY')
-HUME_SECRET_KEY = os.getenv('HUME_SECRET_KEY')
+GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
+genai.configure(api_key=GOOGLE_API_KEY)
 
-# Configure upload settings
-ALLOWED_EXTENSIONS = {'pdf', 'wav', 'mp3'}
-MAX_CONTENT_LENGTH = 16 * 1024 * 1024  # 16MB max file size
+# Initialize Google Cloud Speech client
+speech_client = speech_v1.SpeechClient()
+
+# Configure Gemini
+generation_config = {
+    "temperature": 0.7,
+    "top_p": 0.8,
+    "top_k": 40,
+    "max_output_tokens": 1024,
+}
+model = genai.GenerativeModel(model_name="gemini-pro", generation_config=generation_config)
+
+# Russian filler words list
+RUSSIAN_FILLER_WORDS = [
+    'ну', 'это', 'как бы', 'вот', 'типа', 'значит', 'короче', 'так сказать',
+    'в общем', 'собственно', 'как его', 'эээ', 'ммм', 'кстати', 'просто',
+    'как-то так', 'в принципе', 'на самом деле', 'естественно', 'получается'
+]
 
 def allowed_file(filename, allowed_types):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in allowed_types
@@ -45,47 +61,21 @@ def async_route(f):
         return asyncio.run(f(*args, **kwargs))
     return decorated_function
 
-def process_pdf_to_images(pdf_file):
+def count_filler_words(transcript: str) -> Dict[str, int]:
     """
-    Convert PDF pages to base64 encoded PNG images
+    Count occurrences of Russian filler words in the transcript.
     """
-    try:
-        # Create a temporary file to save the PDF
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_pdf:
-            pdf_file.save(temp_pdf.name)
+    counts = {}
+    transcript_lower = transcript.lower()
+    
+    for word in RUSSIAN_FILLER_WORDS:
+        count = transcript_lower.count(word)
+        if count > 0:
+            counts[word] = count
             
-            # Open the PDF with PyMuPDF
-            doc = fitz.open(temp_pdf.name)
-            slides = []
-            
-            # Process each page
-            for page_num in range(len(doc)):
-                page = doc[page_num]
-                
-                # Render page to PNG with higher resolution
-                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # 2x zoom for better quality
-                
-                # Convert to base64
-                img_bytes = pix.tobytes("png")
-                img_base64 = base64.b64encode(img_bytes).decode()
-                slides.append(f"data:image/png;base64,{img_base64}")
-            
-            doc.close()
-            os.unlink(temp_pdf.name)
-            
-            return {
-                'success': True,
-                'slides': slides,
-                'total_slides': len(slides)
-            }
-            
-    except Exception as e:
-        return {
-            'success': False,
-            'error': str(e)
-        }
+    return counts
 
-async def analyze_voice_emotion(audio_file_path):
+async def analyze_voice_emotion(audio_file_path: str) -> Dict[str, Any]:
     """
     Analyze voice emotions using Hume AI's Prosody API
     """
@@ -109,14 +99,14 @@ async def analyze_voice_emotion(audio_file_path):
                     'score': emotion['score']
                 } for emotion in pred['emotions']])
             
-            # Find dominant emotion
-            dominant_emotion = max(emotions, key=lambda x: x['score'])
+            # Find dominant emotions (top 3)
+            emotions.sort(key=lambda x: x['score'], reverse=True)
+            dominant_emotions = emotions[:3]
             
             return {
                 'success': True,
                 'emotions': emotions,
-                'dominant_emotion': dominant_emotion['name'],
-                'dominant_score': dominant_emotion['score']
+                'dominant_emotions': dominant_emotions
             }
         
         return {
@@ -131,59 +121,88 @@ async def analyze_voice_emotion(audio_file_path):
             'error': str(e)
         }
 
-def generate_gemini_prompt(slide_analysis, transcript, emotion_data):
+async def transcribe_audio(audio_file_path: str) -> Dict[str, Any]:
     """
-    Generate an enhanced prompt for Gemini including emotional analysis
-    """
-    return f"""
-    You are an expert speaking coach. Analyze the user's presentation based on three sources of data:
-
-    1. Slide Content: {slide_analysis}
-
-    2. Speech Transcript: {transcript}
-
-    3. Vocal Emotion Analysis:
-       - Dominant emotion: {emotion_data.get('dominant_emotion', 'N/A')}
-       - Emotion scores: {json.dumps(emotion_data.get('emotions', []), indent=2)}
-
-    Provide a comprehensive analysis that:
-    1. Evaluates the alignment between content, delivery, and emotional tone
-    2. Highlights effective moments
-    3. Suggests specific improvements
-    4. Notes any emotional patterns that could be adjusted
-
-    Format your response with clear sections and actionable feedback.
-    """
-
-@app.route('/process-pdf', methods=['POST'])
-def process_pdf():
-    """
-    Process uploaded PDF and convert pages to images
+    Transcribe audio using Google Cloud Speech-to-Text
     """
     try:
-        if 'pdf' not in request.files:
-            return jsonify({'error': 'No PDF file provided'}), 400
+        with open(audio_file_path, 'rb') as audio_file:
+            content = audio_file.read()
+
+        audio = types.RecognitionAudio(content=content)
+        config = types.RecognitionConfig(
+            encoding=speech_v1.RecognitionConfig.AudioEncoding.LINEAR16,
+            language_code="ru-RU",
+            enable_automatic_punctuation=True,
+        )
+
+        response = speech_client.recognize(config=config, audio=audio)
         
-        pdf_file = request.files['pdf']
-        if pdf_file.filename == '':
-            return jsonify({'error': 'No selected PDF file'}), 400
+        full_transcript = ""
+        for result in response.results:
+            full_transcript += result.alternatives[0].transcript + " "
             
-        if not allowed_file(pdf_file.filename, {'pdf'}):
-            return jsonify({'error': 'Invalid file type. Please upload a PDF file'}), 400
-            
-        result = process_pdf_to_images(pdf_file)
-        
-        if not result['success']:
-            return jsonify({'error': result.get('error', 'Failed to process PDF')}), 500
-            
-        return jsonify(result)
+        return {
+            'success': True,
+            'transcript': full_transcript.strip()
+        }
         
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        print(f"Error in transcribe_audio: {str(e)}")
+        return {
+            'success': False,
+            'error': str(e)
+        }
+
+def generate_feedback(transcript: str, emotion_data: Dict[str, Any], filler_words: Dict[str, int]) -> Dict[str, Any]:
+    """
+    Generate feedback using Google Gemini
+    """
+    try:
+        # Construct the prompt
+        prompt = f"""You are an expert public speaking coach. A user has submitted a recording of their speech in Russian. 
+        Analyze the provided data and give them constructive feedback in Russian language.
+
+        Transcript:
+        {transcript}
+
+        Vocal Emotion Analysis:
+        Dominant emotions: {json.dumps(emotion_data['dominant_emotions'], ensure_ascii=False, indent=2)}
+        Full emotion data: {json.dumps(emotion_data['emotions'], ensure_ascii=False, indent=2)}
+
+        Filler Word Usage:
+        {json.dumps(filler_words, ensure_ascii=False, indent=2)}
+
+        Please provide a detailed analysis that includes:
+        1. Overall impression of their emotional delivery
+        2. Specific feedback on their use of filler words
+        3. Constructive suggestions for improvement
+        4. At least two specific exercises they can practice
+
+        Format the response in clear sections with bullet points where appropriate.
+        Keep the tone encouraging while being honest about areas for improvement."""
+
+        # Generate feedback
+        response = model.generate_content(prompt)
+        
+        return {
+            'success': True,
+            'feedback': response.text
+        }
+        
+    except Exception as e:
+        print(f"Error in generate_feedback: {str(e)}")
+        return {
+            'success': False,
+            'error': str(e)
+        }
 
 @app.route('/analyze', methods=['POST'])
 @async_route
 async def analyze():
+    """
+    Process uploaded audio file and perform comprehensive analysis
+    """
     try:
         if 'audio' not in request.files:
             return jsonify({'error': 'No audio file provided'}), 400
@@ -192,48 +211,63 @@ async def analyze():
         if audio_file.filename == '':
             return jsonify({'error': 'No selected audio file'}), 400
 
-        if not allowed_file(audio_file.filename, {'wav', 'mp3'}):
-            return jsonify({'error': 'Invalid file type. Please upload a WAV or MP3 file'}), 400
-
         # Save audio file temporarily
         with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as temp_audio:
             audio_file.save(temp_audio.name)
             
-            # Analyze emotions
-            emotion_analysis = await analyze_voice_emotion(temp_audio.name)
-            
-            if not emotion_analysis['success']:
-                return jsonify({
-                    'error': f"Emotion analysis failed: {emotion_analysis.get('error', 'Unknown error')}"
-                }), 500
+            try:
+                # 1. Analyze emotions
+                emotion_analysis = await analyze_voice_emotion(temp_audio.name)
+                if not emotion_analysis['success']:
+                    raise Exception(f"Emotion analysis failed: {emotion_analysis.get('error')}")
 
-            # Get the slide content from the request
-            slide_content = request.form.get('slide_content', 'No slide content provided')
-            transcript = "Placeholder for speech transcript"  # To be implemented
+                # 2. Transcribe speech
+                transcription = await transcribe_audio(temp_audio.name)
+                if not transcription['success']:
+                    raise Exception(f"Transcription failed: {transcription.get('error')}")
 
-            # Generate enhanced prompt
-            prompt = generate_gemini_prompt(slide_content, transcript, emotion_analysis)
+                # 3. Count filler words
+                filler_word_counts = count_filler_words(transcription['transcript'])
 
-            # For now, return the emotion analysis and prompt
-            response = {
-                'emotionalAnalysis': emotion_analysis,
-                'prompt': prompt,
-                'technicalMetrics': {
-                    'emotions': emotion_analysis['emotions'],
-                    'pacing': {'score': 0.0},  # Placeholder
-                    'clarity': 0.0  # Placeholder
+                # 4. Generate feedback
+                feedback = generate_feedback(
+                    transcription['transcript'],
+                    emotion_analysis,
+                    filler_word_counts
+                )
+                if not feedback['success']:
+                    raise Exception(f"Feedback generation failed: {feedback.get('error')}")
+
+                # Prepare response
+                response = {
+                    'transcript': transcription['transcript'],
+                    'emotionalAnalysis': emotion_analysis,
+                    'fillerWords': filler_word_counts,
+                    'feedback': feedback['feedback']
                 }
-            }
 
-            # Clean up temporary file
-            os.unlink(temp_audio.name)
-            
-            return jsonify(response)
+                return jsonify(response)
+
+            finally:
+                # Clean up temporary file
+                os.unlink(temp_audio.name)
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/test-config', methods=['GET'])
+def test_config():
+    """
+    Test route to verify API keys are loaded
+    """
+    return jsonify({
+        'hume_key_set': bool(HUME_API_KEY),
+        'google_key_set': bool(GOOGLE_API_KEY)
+    })
+
 if __name__ == '__main__':
-    if not HUME_API_KEY or not HUME_SECRET_KEY:
-        raise ValueError("Hume AI credentials not found in environment variables")
+    if not HUME_API_KEY:
+        raise ValueError("Hume AI API key not found in environment variables")
+    if not GOOGLE_API_KEY:
+        raise ValueError("Google API key not found in environment variables")
     app.run(debug=True, host='0.0.0.0', port=5000) 
