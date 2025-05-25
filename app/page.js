@@ -1,9 +1,15 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useDropzone } from 'react-dropzone'
-import { useReactMediaRecorder } from 'react-media-recorder'
+import dynamic from 'next/dynamic'
 import { CloudArrowUpIcon, MicrophoneIcon, StopIcon } from '@heroicons/react/24/outline'
+
+// Dynamically import ReactMediaRecorder with no SSR
+const ReactMediaRecorder = dynamic(
+  () => import('react-media-recorder').then(mod => ({ default: mod.useReactMediaRecorder })),
+  { ssr: false }
+)
 
 export default function Home() {
   const [presentationSlides, setPresentationSlides] = useState([])
@@ -12,14 +18,21 @@ export default function Home() {
   const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [isProcessingPDF, setIsProcessingPDF] = useState(false)
   const [uploadError, setUploadError] = useState(null)
+  const [mediaRecorderHook, setMediaRecorderHook] = useState(null)
   
-  const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://127.0.0.1:5000'
+  const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || '/api'
   console.log('Backend URL:', BACKEND_URL)
-  
-  const { status, startRecording, stopRecording, mediaBlobUrl } = useReactMediaRecorder({
-    audio: true,
-    video: false,
-  })
+
+  // Initialize media recorder on client side only
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const { status, startRecording, stopRecording, mediaBlobUrl } = ReactMediaRecorder({
+        audio: true,
+        video: false,
+      })
+      setMediaRecorderHook({ status, startRecording, stopRecording, mediaBlobUrl })
+    }
+  }, [])
 
   const { getRootProps, getInputProps } = useDropzone({
     accept: {
@@ -92,7 +105,7 @@ export default function Home() {
   })
 
   const handleAnalysis = async () => {
-    if (!presentationSlides.length || !mediaBlobUrl) {
+    if (!presentationSlides.length || !mediaRecorderHook?.mediaBlobUrl) {
       alert('Please upload a presentation and record your speech first.')
       return
     }
@@ -101,7 +114,7 @@ export default function Home() {
     setUploadError(null)
     
     try {
-      const audioBlob = await fetch(mediaBlobUrl).then(r => r.blob())
+      const audioBlob = await fetch(mediaRecorderHook.mediaBlobUrl).then(r => r.blob())
       const audioFile = new File([audioBlob], 'recording.wav', { type: 'audio/wav' })
 
       const formData = new FormData()
@@ -132,6 +145,10 @@ export default function Home() {
     } finally {
       setIsAnalyzing(false)
     }
+  }
+
+  if (!mediaRecorderHook) {
+    return <div>Loading media recorder...</div>
   }
 
   return (
@@ -196,9 +213,9 @@ export default function Home() {
         <div className="space-y-4">
           <h2 className="text-xl font-semibold">2. Record Your Speech</h2>
           <div className="border-2 rounded-lg p-6 text-center">
-            {status === 'recording' ? (
+            {mediaRecorderHook.status === 'recording' ? (
               <button
-                onClick={stopRecording}
+                onClick={mediaRecorderHook.stopRecording}
                 className="bg-red-500 text-white px-4 py-2 rounded-full hover:bg-red-600 transition-colors flex items-center justify-center gap-2 mx-auto"
               >
                 <StopIcon className="h-5 w-5" />
@@ -206,16 +223,16 @@ export default function Home() {
               </button>
             ) : (
               <button
-                onClick={startRecording}
+                onClick={mediaRecorderHook.startRecording}
                 className="bg-blue-500 text-white px-4 py-2 rounded-full hover:bg-blue-600 transition-colors flex items-center justify-center gap-2 mx-auto"
               >
                 <MicrophoneIcon className="h-5 w-5" />
                 Start Recording
               </button>
             )}
-            {mediaBlobUrl && (
+            {mediaRecorderHook.mediaBlobUrl && (
               <div className="mt-4">
-                <audio src={mediaBlobUrl} controls className="mx-auto" />
+                <audio src={mediaRecorderHook.mediaBlobUrl} controls className="mx-auto" />
               </div>
             )}
           </div>
@@ -225,7 +242,7 @@ export default function Home() {
       <section className="text-center">
         <button
           onClick={handleAnalysis}
-          disabled={!presentationSlides.length || !mediaBlobUrl || isAnalyzing}
+          disabled={!presentationSlides.length || !mediaRecorderHook.mediaBlobUrl || isAnalyzing}
           className="bg-green-500 text-white px-6 py-3 rounded-full hover:bg-green-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
         >
           {isAnalyzing ? 'Analyzing...' : 'Analyze Presentation'}
