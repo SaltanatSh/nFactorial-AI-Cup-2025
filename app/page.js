@@ -1,14 +1,23 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useDropzone } from 'react-dropzone'
 import dynamic from 'next/dynamic'
 import { CloudArrowUpIcon, MicrophoneIcon, StopIcon } from '@heroicons/react/24/outline'
 
 // Dynamically import ReactMediaRecorder with no SSR
 const ReactMediaRecorder = dynamic(
-  () => import('react-media-recorder').then(mod => ({ default: mod.useReactMediaRecorder })),
-  { ssr: false }
+  () => import('react-media-recorder').then(mod => {
+    // Ensure we're in a browser environment
+    if (typeof window === 'undefined') {
+      return { default: () => ({ status: 'idle', startRecording: () => {}, stopRecording: () => {}, mediaBlobUrl: null }) }
+    }
+    return { default: mod.useReactMediaRecorder }
+  }),
+  { 
+    ssr: false,
+    loading: () => <div>Loading media recorder...</div>
+  }
 )
 
 export default function Home() {
@@ -19,19 +28,113 @@ export default function Home() {
   const [isProcessingPDF, setIsProcessingPDF] = useState(false)
   const [uploadError, setUploadError] = useState(null)
   const [mediaRecorderHook, setMediaRecorderHook] = useState(null)
+  const [mediaError, setMediaError] = useState(null)
+  const [isRecording, setIsRecording] = useState(false)
   
   const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || '/api'
   console.log('Backend URL:', BACKEND_URL)
 
+  // Handle recording start
+  const handleStartRecording = useCallback(async () => {
+    console.log('Start recording clicked')
+    if (!mediaRecorderHook) {
+      console.error('Media recorder not initialized')
+      setMediaError('Media recorder not initialized. Please refresh the page.')
+      return
+    }
+
+    try {
+      // Check microphone access again
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      console.log('Microphone access granted:', stream.active)
+      
+      // Start recording
+      console.log('Starting recording...')
+      setIsRecording(true)
+      mediaRecorderHook.startRecording()
+      
+      // Add visual feedback
+      const button = document.querySelector('.record-button')
+      if (button) {
+        button.classList.add('recording')
+      }
+    } catch (error) {
+      console.error('Failed to start recording:', error)
+      setMediaError(`Failed to start recording: ${error.message}`)
+      setIsRecording(false)
+    }
+  }, [mediaRecorderHook])
+
+  // Handle recording stop
+  const handleStopRecording = useCallback(() => {
+    console.log('Stop recording clicked')
+    if (!mediaRecorderHook) {
+      console.error('Media recorder not initialized')
+      return
+    }
+
+    try {
+      console.log('Stopping recording...')
+      mediaRecorderHook.stopRecording()
+      setIsRecording(false)
+      
+      // Remove visual feedback
+      const button = document.querySelector('.record-button')
+      if (button) {
+        button.classList.remove('recording')
+      }
+    } catch (error) {
+      console.error('Failed to stop recording:', error)
+      setMediaError(`Failed to stop recording: ${error.message}`)
+    }
+  }, [mediaRecorderHook])
+
   // Initialize media recorder on client side only
   useEffect(() => {
-    if (typeof window !== 'undefined') {
-      const { status, startRecording, stopRecording, mediaBlobUrl } = ReactMediaRecorder({
-        audio: true,
-        video: false,
-      })
-      setMediaRecorderHook({ status, startRecording, stopRecording, mediaBlobUrl })
+    async function initializeMediaRecorder() {
+      try {
+        // First, check if browser supports getUserMedia
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          throw new Error('Your browser does not support audio recording')
+        }
+
+        // Request audio permissions explicitly
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+        console.log('Audio permissions granted:', stream.active)
+        
+        // Stop the test stream
+        stream.getTracks().forEach(track => track.stop())
+
+        // Initialize ReactMediaRecorder
+        const { status, startRecording, stopRecording, mediaBlobUrl, error } = ReactMediaRecorder({
+          audio: true,
+          video: false,
+          askPermissionOnMount: true,
+          onStart: () => {
+            console.log('Recording started')
+            setIsRecording(true)
+          },
+          onStop: () => {
+            console.log('Recording stopped')
+            setIsRecording(false)
+          },
+          onError: (err) => {
+            console.error('Media Recorder Error:', err)
+            setMediaError(`Recording error: ${err.message || 'Unknown error'}`)
+            setIsRecording(false)
+          }
+        })
+
+        console.log('Media Recorder initialized:', { status, mediaBlobUrl, error })
+        setMediaRecorderHook({ status, startRecording, stopRecording, mediaBlobUrl })
+        setMediaError(null)
+      } catch (error) {
+        console.error('Media Recorder initialization failed:', error)
+        setMediaError(`Could not initialize audio recording: ${error.message}`)
+      }
     }
+
+    initializeMediaRecorder()
   }, [])
 
   const { getRootProps, getInputProps } = useDropzone({
@@ -213,27 +316,69 @@ export default function Home() {
         <div className="space-y-4">
           <h2 className="text-xl font-semibold">2. Record Your Speech</h2>
           <div className="border-2 rounded-lg p-6 text-center">
-            {mediaRecorderHook.status === 'recording' ? (
-              <button
-                onClick={mediaRecorderHook.stopRecording}
-                className="bg-red-500 text-white px-4 py-2 rounded-full hover:bg-red-600 transition-colors flex items-center justify-center gap-2 mx-auto"
-              >
-                <StopIcon className="h-5 w-5" />
-                Stop Recording
-              </button>
-            ) : (
-              <button
-                onClick={mediaRecorderHook.startRecording}
-                className="bg-blue-500 text-white px-4 py-2 rounded-full hover:bg-blue-600 transition-colors flex items-center justify-center gap-2 mx-auto"
-              >
-                <MicrophoneIcon className="h-5 w-5" />
-                Start Recording
-              </button>
-            )}
-            {mediaRecorderHook.mediaBlobUrl && (
-              <div className="mt-4">
-                <audio src={mediaRecorderHook.mediaBlobUrl} controls className="mx-auto" />
+            {mediaError ? (
+              <div className="text-red-500 mb-4">
+                <p>{mediaError}</p>
+                <p className="text-sm mt-2">Please ensure you have:</p>
+                <ul className="text-sm list-disc list-inside">
+                  <li>Allowed microphone access in your browser</li>
+                  <li>Connected a working microphone</li>
+                  <li>Not blocked audio permissions for this site</li>
+                </ul>
+                <button
+                  onClick={() => window.location.reload()}
+                  className="mt-4 text-blue-500 underline"
+                >
+                  Refresh page to try again
+                </button>
               </div>
+            ) : !mediaRecorderHook ? (
+              <div className="text-gray-500">
+                <p>Initializing audio recorder...</p>
+                <p className="text-sm mt-2">Please allow microphone access when prompted</p>
+              </div>
+            ) : (
+              <>
+                <div className="space-y-4">
+                  <div className="text-sm text-gray-600 mb-2">
+                    Status: {isRecording ? 'Recording...' : 'Ready to record'}
+                  </div>
+                  
+                  {isRecording ? (
+                    <button
+                      onClick={handleStopRecording}
+                      className="record-button bg-red-500 text-white px-6 py-3 rounded-full hover:bg-red-600 transition-colors flex items-center justify-center gap-2 mx-auto relative"
+                    >
+                      <StopIcon className="h-5 w-5" />
+                      Stop Recording
+                      <span className="absolute top-0 right-0 h-3 w-3 bg-red-500 rounded-full animate-pulse"></span>
+                    </button>
+                  ) : (
+                    <button
+                      onClick={handleStartRecording}
+                      className="record-button bg-blue-500 text-white px-6 py-3 rounded-full hover:bg-blue-600 transition-colors flex items-center justify-center gap-2 mx-auto"
+                    >
+                      <MicrophoneIcon className="h-5 w-5" />
+                      Start Recording
+                    </button>
+                  )}
+                </div>
+
+                {mediaRecorderHook.mediaBlobUrl && (
+                  <div className="mt-6 p-4 bg-gray-50 rounded-lg">
+                    <p className="text-sm text-gray-600 mb-2">Your Recording:</p>
+                    <audio 
+                      src={mediaRecorderHook.mediaBlobUrl} 
+                      controls 
+                      className="mx-auto w-full"
+                      onError={(e) => {
+                        console.error('Audio playback error:', e)
+                        setMediaError('Failed to play recording. Please try again.')
+                      }}
+                    />
+                  </div>
+                )}
+              </>
             )}
           </div>
         </div>
