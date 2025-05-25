@@ -2,7 +2,7 @@ import os
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
-from hume import HumeStreamClient
+from hume import HumeClient
 from hume.models.config import ProsodyConfig
 import tempfile
 import asyncio
@@ -21,9 +21,10 @@ app = Flask(__name__)
 # Configure CORS to allow requests from frontend
 CORS(app, resources={
     r"/*": {
-        "origins": ["http://localhost:3000", "http://localhost:3001"],
+        "origins": ["http://localhost:3000", "http://localhost:3001", "http://127.0.0.1:3000", "http://127.0.0.1:3001"],
         "methods": ["GET", "POST", "OPTIONS"],
-        "allow_headers": ["Content-Type"]
+        "allow_headers": ["Content-Type", "Accept"],
+        "supports_credentials": False
     }
 })
 
@@ -89,38 +90,42 @@ async def analyze_voice_emotion(audio_file_path):
     Analyze voice emotions using Hume AI's Prosody API
     """
     try:
-        client = HumeStreamClient(HUME_API_KEY)
+        client = HumeClient(HUME_API_KEY)
         config = ProsodyConfig()
         
-        async with client.connect([config]) as socket:
-            result = await socket.send_file(audio_file_path)
+        # Send the file for analysis
+        result = client.submit_job(audio_file_path, [config])
+        
+        # Get the full predictions
+        full_predictions = result.get_predictions()
+        
+        # Process emotions
+        emotions = []
+        if full_predictions and len(full_predictions) > 0:
+            predictions = full_predictions[0]['results']['predictions']
+            for pred in predictions:
+                emotions.extend([{
+                    'name': emotion['name'],
+                    'score': emotion['score']
+                } for emotion in pred['emotions']])
             
-            # Process emotions
-            emotions = []
-            if result and result.get('prosody'):
-                predictions = result['prosody'][0]['predictions']
-                for pred in predictions:
-                    emotions.extend([{
-                        'name': emotion['name'],
-                        'score': emotion['score']
-                    } for emotion in pred['emotions']])
-                
-                # Find dominant emotion
-                dominant_emotion = max(emotions, key=lambda x: x['score'])
-                
-                return {
-                    'success': True,
-                    'emotions': emotions,
-                    'dominant_emotion': dominant_emotion['name'],
-                    'dominant_score': dominant_emotion['score']
-                }
+            # Find dominant emotion
+            dominant_emotion = max(emotions, key=lambda x: x['score'])
             
             return {
-                'success': False,
-                'error': 'No prosody data found in the response'
+                'success': True,
+                'emotions': emotions,
+                'dominant_emotion': dominant_emotion['name'],
+                'dominant_score': dominant_emotion['score']
             }
-            
+        
+        return {
+            'success': False,
+            'error': 'No prosody data found in the response'
+        }
+        
     except Exception as e:
+        print(f"Error in analyze_voice_emotion: {str(e)}")
         return {
             'success': False,
             'error': str(e)
@@ -231,4 +236,4 @@ async def analyze():
 if __name__ == '__main__':
     if not HUME_API_KEY or not HUME_SECRET_KEY:
         raise ValueError("Hume AI credentials not found in environment variables")
-    app.run(debug=True, port=5000) 
+    app.run(debug=True, host='0.0.0.0', port=5000) 

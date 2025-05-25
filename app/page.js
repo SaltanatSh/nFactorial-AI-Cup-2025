@@ -11,6 +11,10 @@ export default function Home() {
   const [feedback, setFeedback] = useState(null)
   const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [isProcessingPDF, setIsProcessingPDF] = useState(false)
+  const [uploadError, setUploadError] = useState(null)
+  
+  const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://127.0.0.1:5000'
+  console.log('Backend URL:', BACKEND_URL)
   
   const { status, startRecording, stopRecording, mediaBlobUrl } = useReactMediaRecorder({
     audio: true,
@@ -27,33 +31,59 @@ export default function Home() {
       if (!file) return
 
       setIsProcessingPDF(true)
+      setUploadError(null)
+      
       try {
         const formData = new FormData()
         formData.append('pdf', file)
 
-        const response = await fetch('http://localhost:5000/process-pdf', {
+        console.log('Sending PDF to backend...', BACKEND_URL)
+        const response = await fetch(`${BACKEND_URL}/process-pdf`, {
           method: 'POST',
           body: formData,
           headers: {
             'Accept': 'application/json',
           },
           mode: 'cors',
+          credentials: 'omit'
         })
 
+        console.log('Response status:', response.status)
+        console.log('Response headers:', Object.fromEntries([...response.headers]))
+        
         if (!response.ok) {
-          const errorData = await response.json().catch(() => ({ error: 'Unknown error occurred' }))
-          throw new Error(errorData.error || `Server error: ${response.status}`)
+          let errorMessage = 'Failed to process PDF'
+          try {
+            const errorData = await response.json()
+            errorMessage = errorData.error || errorMessage
+          } catch (e) {
+            console.error('Error parsing error response:', e)
+            errorMessage = `Server error: ${response.status} ${response.statusText}`
+          }
+          throw new Error(errorMessage)
         }
 
         const data = await response.json()
+        console.log('Response data:', data)
+        
+        if (!data.slides || !Array.isArray(data.slides)) {
+          throw new Error('Invalid response format from server')
+        }
+
+        console.log('PDF processed successfully, received', data.slides.length, 'slides')
         setPresentationSlides(data.slides)
         setActiveSlideIndex(0)
       } catch (error) {
         console.error('PDF processing failed:', error)
-        if (error.message.includes('Failed to fetch')) {
-          alert('Could not connect to the server. Please make sure the backend server is running.')
+        if (!navigator.onLine) {
+          setUploadError('You appear to be offline. Please check your internet connection.')
+        } else if (error.message === 'Failed to fetch') {
+          setUploadError(`Could not connect to the server at ${BACKEND_URL}. Please ensure:
+1. The backend server is running
+2. The server is accessible at ${BACKEND_URL}
+3. CORS is properly configured`)
         } else {
-          alert(`Failed to process the PDF: ${error.message}`)
+          setUploadError(`Error: ${error.message}`)
         }
       } finally {
         setIsProcessingPDF(false)
@@ -68,8 +98,9 @@ export default function Home() {
     }
 
     setIsAnalyzing(true)
+    setUploadError(null)
+    
     try {
-      // Convert the mediaBlobUrl to a File object
       const audioBlob = await fetch(mediaBlobUrl).then(r => r.blob())
       const audioFile = new File([audioBlob], 'recording.wav', { type: 'audio/wav' })
 
@@ -77,20 +108,27 @@ export default function Home() {
       formData.append('audio', audioFile)
       formData.append('slide_content', `Slide ${activeSlideIndex + 1} of ${presentationSlides.length}`)
 
-      const response = await fetch('http://localhost:5000/analyze', {
+      const response = await fetch(`${BACKEND_URL}/analyze`, {
         method: 'POST',
-        body: formData
+        body: formData,
+        headers: {
+          'Accept': 'application/json',
+        },
+        mode: 'cors',
       })
 
-      const data = await response.json()
       if (!response.ok) {
-        throw new Error(data.error || 'Analysis failed')
+        const errorData = await response.json().catch(() => ({ error: 'Unknown error occurred' }))
+        throw new Error(errorData.error || `Server error: ${response.status}`)
       }
 
+      const data = await response.json()
       setFeedback(data)
     } catch (error) {
       console.error('Analysis failed:', error)
-      alert('Failed to analyze the presentation. Please try again.')
+      setUploadError(error.message.includes('Failed to fetch')
+        ? 'Could not connect to the server. Please make sure the backend server is running.'
+        : `Analysis failed: ${error.message}`)
     } finally {
       setIsAnalyzing(false)
     }
@@ -110,6 +148,9 @@ export default function Home() {
             <p className="mt-2">Drag & drop a PDF presentation here, or click to select</p>
             {isProcessingPDF && (
               <p className="mt-2 text-blue-500">Processing PDF...</p>
+            )}
+            {uploadError && (
+              <p className="mt-2 text-red-500 text-sm">{uploadError}</p>
             )}
           </div>
 
