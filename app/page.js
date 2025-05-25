@@ -1,77 +1,141 @@
 'use client'
 
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { MicrophoneIcon, StopIcon } from '@heroicons/react/24/outline'
 
 export default function Home() {
   const [isRecording, setIsRecording] = useState(false)
   const [isProcessing, setIsProcessing] = useState(false)
+  const [audioBlob, setAudioBlob] = useState(null)
   const [audioURL, setAudioURL] = useState(null)
   const [feedback, setFeedback] = useState(null)
   const [error, setError] = useState(null)
 
   const mediaRecorderRef = useRef(null)
-  const chunksRef = useRef([])
+  const mediaStreamRef = useRef(null)
+  const audioChunksRef = useRef([])
+
+  // Cleanup function
+  useEffect(() => {
+    return () => {
+      if (mediaStreamRef.current) {
+        mediaStreamRef.current.getTracks().forEach(track => track.stop())
+      }
+      if (audioURL) {
+        URL.revokeObjectURL(audioURL)
+      }
+    }
+  }, [audioURL])
 
   const startRecording = async () => {
     try {
+      // Reset state
       setError(null)
-      chunksRef.current = []
+      setAudioBlob(null)
+      setAudioURL(null)
+      setFeedback(null)
+      audioChunksRef.current = []
 
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      const recorder = new MediaRecorder(stream)
+      console.log('Requesting microphone access...')
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          channelCount: 1,
+          sampleRate: 44100
+        }
+      })
 
-      recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) {
-          chunksRef.current.push(e.data)
+      mediaStreamRef.current = stream
+      console.log('Microphone access granted')
+
+      const recorder = new MediaRecorder(stream, {
+        mimeType: 'audio/webm;codecs=opus'
+      })
+
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data)
         }
       }
 
       recorder.onstop = () => {
-        const blob = new Blob(chunksRef.current, { type: 'audio/webm' })
+        const blob = new Blob(audioChunksRef.current, { type: 'audio/webm' })
         const url = URL.createObjectURL(blob)
+        setAudioBlob(blob)
         setAudioURL(url)
-        stream.getTracks().forEach(track => track.stop())
+        setIsRecording(false)
+
+        // Stop the stream
+        if (mediaStreamRef.current) {
+          mediaStreamRef.current.getTracks().forEach(track => track.stop())
+        }
       }
 
+      recorder.onerror = (event) => {
+        console.error('Recording error:', event.error)
+        setError('Recording error: ' + (event.error.message || 'Unknown error'))
+        setIsRecording(false)
+
+        if (mediaStreamRef.current) {
+          mediaStreamRef.current.getTracks().forEach(track => track.stop())
+        }
+      }
+
+      // Start recording
       recorder.start()
       mediaRecorderRef.current = recorder
       setIsRecording(true)
+      console.log('Recording started')
+
     } catch (err) {
+      console.error('Failed to start recording:', err)
       setError('Could not start recording: ' + err.message)
+      setIsRecording(false)
+
+      if (mediaStreamRef.current) {
+        mediaStreamRef.current.getTracks().forEach(track => track.stop())
+      }
     }
   }
 
   const stopRecording = () => {
-    if (mediaRecorderRef.current) {
+    console.log('Stopping recording...')
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
       mediaRecorderRef.current.stop()
-      setIsRecording(false)
+      console.log('Recording stopped')
     }
   }
 
   const analyzeRecording = async () => {
+    if (!audioBlob) {
+      setError('No recording to analyze')
+      return
+    }
+
     try {
       setIsProcessing(true)
       setError(null)
 
-      const response = await fetch(audioURL)
-      const blob = await response.blob()
-
+      console.log('Sending recording for analysis...')
       const formData = new FormData()
-      formData.append('audio', blob, 'recording.webm')
+      formData.append('audio', audioBlob, 'recording.webm')
 
-      const analysisResponse = await fetch('/api/analyze', {
+      const response = await fetch('/api/analyze', {
         method: 'POST',
         body: formData
       })
 
-      if (!analysisResponse.ok) {
+      if (!response.ok) {
         throw new Error('Failed to analyze recording')
       }
 
-      const data = await analysisResponse.json()
+      const data = await response.json()
       setFeedback(data)
+      console.log('Analysis complete')
     } catch (err) {
+      console.error('Analysis failed:', err)
       setError('Analysis failed: ' + err.message)
     } finally {
       setIsProcessing(false)
@@ -79,9 +143,17 @@ export default function Home() {
   }
 
   const resetRecording = () => {
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach(track => track.stop())
+    }
+    if (audioURL) {
+      URL.revokeObjectURL(audioURL)
+    }
+    setAudioBlob(null)
     setAudioURL(null)
     setFeedback(null)
     setError(null)
+    audioChunksRef.current = []
   }
 
   return (
@@ -125,7 +197,12 @@ export default function Home() {
 
           {audioURL && !isRecording && (
             <div className="space-y-4">
-              <audio src={audioURL} controls className="w-full" />
+              <audio 
+                src={audioURL} 
+                controls 
+                className="w-full"
+                controlsList="nodownload"
+              />
               <button
                 onClick={analyzeRecording}
                 disabled={isProcessing}
